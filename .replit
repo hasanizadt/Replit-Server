@@ -1,0 +1,32 @@
+modules = ["nodejs-20", "postgresql-16"]
+
+[[ports]]
+localPort = 3000
+externalPort = 80
+
+[nix]
+channel = "stable-24_05"
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "auth-server"
+
+[[workflows.workflow]]
+name = "auth-server"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "npm run start:dev"
+waitForPort = 5000
+
+[deployment]
+run = ["sh", "-c", "npm run start:dev"]

@@ -1,0 +1,758 @@
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+import { CreateProductInput } from './dto/create-product.input';
+import { UpdateProductInput } from './dto/update-product.input';
+import { SearchProductInput } from './dto/search-product.input';
+import { generateSlug } from '../config/app.config';
+import { Prisma } from '@prisma/client';
+import { CreateTagInput } from './dto/create-tag.input';
+import { UpdateTagInput } from './dto/update-tag.input';
+import { CreateShopInput } from './dto/create-shop.input';
+import { UpdateShopInput } from './dto/update-shop.input';
+import { CreateSellerInput } from './dto/create-seller.input';
+import { UpdateSellerInput } from './dto/update-seller.input';
+import { CreateFlashInput } from './dto/create-flash.input';
+import { UpdateFlashInput } from './dto/update-flash.input';
+import { SearchInput } from '../common/dto/search.input';
+
+@Injectable()
+export class ProductService {
+  constructor(private readonly prisma: PrismaService) {}
+
+  async createProduct(data: CreateProductInput) {
+    const slug = generateSlug(data.name);
+    let totalPrice = data.price;
+
+    if (data.discount && data.discount > 0) {
+      if (data.discountUnit === 'FLAT') {
+        totalPrice = data.price - data.discount;
+      } else if (data.discountUnit === 'PERCENT') {
+        totalPrice = data.price - (data.price * data.discount) / 100;
+      }
+    }
+
+    const images = data.images ?? [];
+    const { tagIds, subCategoryIds, ...productData } = data;
+
+    try {
+      const product = await this.prisma.product.create({
+        data: {
+          ...productData,
+          slug,
+          totalPrice,
+          images,
+          reviewRating: 0,
+          totalReviews: 0,
+          viewCount: 0,
+          salesCount: 0,
+          isFeatured: data.isFeatured ?? false,
+          isApproved: false,
+          isHide: false,
+          tags: tagIds ? {
+            connect: tagIds.map((id) => ({ id })),
+          } : undefined,
+          subCategories: subCategoryIds ? {
+            connect: subCategoryIds.map((id) => ({ id })),
+          } : undefined,
+        },
+        include: {
+          mainCategory: true,
+          category: true,
+          subCategories: true,
+          brand: true,
+          shop: true,
+          seller: true,
+          tags: true,
+          flash: true,
+          meta: true,
+        },
+      });
+
+      return product;
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError) {
+        throw new Error(`Database error: ${error.message}`);
+      }
+      throw new Error(`Failed to create product: ${error.message}`);
+    }
+  }
+
+  async findAllProducts(searchInput: SearchProductInput) {
+    const {
+      page = 1,
+      limit = 10,
+      search,
+      sortBy = 'NEWEST',
+      minPrice,
+      maxPrice,
+      mainCategoryId,
+      categoryId,
+      subCategoryIds,
+      brandId,
+      shopId,
+      sellerId,
+      tagIds,
+      isFeatured,
+      hasDiscount,
+      minRating,
+      flashId,
+    } = searchInput;
+
+    try {
+      const where: Prisma.ProductWhereInput = {
+        deleted: false,
+      };
+
+      if (search) {
+        where.OR = [
+          { name: { contains: search, mode: 'insensitive' } },
+          { description: { contains: search, mode: 'insensitive' } },
+        ];
+      }
+
+      if (minPrice !== undefined || maxPrice !== undefined) {
+        where.price = {};
+        if (minPrice !== undefined) {
+          where.price.gte = minPrice;
+        }
+        if (maxPrice !== undefined) {
+          where.price.lte = maxPrice;
+        }
+      }
+
+      if (categoryId) {
+        where.categoryId = categoryId;
+      }
+
+      if (brandId) {
+        where.brandId = brandId;
+      }
+
+      if (tagIds?.length) {
+        where.ProductTags = {
+          some: {
+            tagId: { in: tagIds },
+          },
+        };
+      }
+
+      if (hasDiscount) {
+        where.discountAmount = { gt: 0 };
+      }
+
+      const orderBy: Prisma.ProductOrderByWithRelationInput = { createdAt: 'desc' };
+
+      switch (sortBy) {
+        case 'OLDEST':
+          orderBy.createdAt = 'asc';
+          break;
+        case 'PRICE_LOW_TO_HIGH':
+          orderBy.price = 'asc';
+          break;
+        case 'PRICE_HIGH_TO_LOW':
+          orderBy.price = 'desc';
+          break;
+        case 'POPULARITY':
+          orderBy.viewCount = 'desc';
+          break;
+        case 'RATING':
+          orderBy.reviewRating = 'desc';
+          break;
+      }
+
+      const skip = (page - 1) * limit;
+
+      const [results, totalItems] = await Promise.all([
+        this.prisma.product.findMany({
+          where,
+          orderBy,
+          skip,
+          take: limit,
+          include: {
+            category: true,
+            subCategories: true,
+            brand: true,
+            shop: true,
+            seller: true,
+            tags: true,
+            flash: true,
+            meta: true,
+          },
+        }),
+        this.prisma.product.count({ where }),
+      ]);
+
+      const totalPages = Math.ceil(totalItems / limit);
+
+      return {
+        results,
+        meta: {
+          itemCount: results.length,
+          totalItems,
+          itemsPerPage: limit,
+          totalPages,
+          currentPage: page,
+        },
+      };
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError) {
+        throw new Error(`Database error: ${error.message}`);
+      }
+      throw new Error(`Failed to fetch products: ${error.message}`);
+    }
+  }
+
+  async getFeaturedProducts() {
+    try {
+      return await this.prisma.product.findMany({
+        where: {
+          isApproved: true,
+          isHide: false,
+          isFeatured: true,
+          deletedAt: null,
+        },
+        include: {
+          mainCategory: true,
+          category: true,
+          subCategories: true,
+          brand: true,
+          shop: true,
+          seller: true,
+          tags: true,
+          flash: true,
+          meta: true,
+        },
+      });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError) {
+        throw new Error(`Database error: ${error.message}`);
+      }
+      throw new Error(`Failed to fetch featured products: ${error.message}`);
+    }
+  }
+
+  async findProductById(id: string) {
+    try {
+      const product = await this.prisma.product.findUnique({
+        where: { id, isHide: false, deletedAt: null },
+        include: {
+          mainCategory: true,
+          category: true,
+          subCategories: true,
+          brand: true,
+          shop: true,
+          seller: true,
+          tags: true,
+          flash: true,
+          meta: true,
+        },
+      });
+
+      if (!product) {
+        throw new NotFoundException(`Product with ID ${id} not found`);
+      }
+
+      await this.prisma.product.update({
+        where: { id },
+        data: { viewCount: (product.viewCount ?? 0) + 1 },
+      });
+
+      return product;
+    } catch (error) {
+      if (error instanceof NotFoundException) {
+        throw error;
+      }
+      if (error instanceof Prisma.PrismaClientKnownRequestError) {
+        throw new Error(`Database error: ${error.message}`);
+      }
+      throw new Error(`Failed to fetch product: ${error.message}`);
+    }
+  }
+
+  async findProductBySlug(slug: string) {
+    try {
+      const product = await this.prisma.product.findUnique({
+        where: { slug, isHide: false, deletedAt: null },
+        include: {
+          mainCategory: true,
+          category: true,
+          subCategories: true,
+          brand: true,
+          shop: true,
+          seller: true,
+          tags: true,
+          flash: true,
+          meta: true,
+        },
+      });
+
+      if (!product) {
+        throw new NotFoundException(`Product with slug ${slug} not found`);
+      }
+
+      await this.prisma.product.update({
+        where: { id: product.id },
+        data: { viewCount: (product.viewCount ?? 0) + 1 },
+      });
+
+      return product;
+    } catch (error) {
+      if (error instanceof NotFoundException) {
+        throw error;
+      }
+      if (error instanceof Prisma.PrismaClientKnownRequestError) {
+        throw new Error(`Database error: ${error.message}`);
+      }
+      throw new Error(`Failed to fetch product: ${error.message}`);
+    }
+  }
+
+  async updateProduct(data: UpdateProductInput) {
+    const { id, tagIds, subCategoryIds, ...updateData } = data;
+
+    try {
+      const product = await this.prisma.product.findUnique({
+        where: { id },
+      });
+
+      if (!product) {
+        throw new NotFoundException(`Product with ID ${id} not found`);
+      }
+
+      const slug = updateData.name ? generateSlug(updateData.name) : product.slug;
+      let totalPrice = product.totalPrice;
+
+      if (updateData.price !== undefined || updateData.discount !== undefined) {
+        const price = updateData.price ?? product.price;
+        const discount = updateData.discount ?? product.discount;
+        const discountUnit = updateData.discountUnit ?? product.discountUnit;
+
+        if (discount && discount > 0) {
+          if (discountUnit === 'FLAT') {
+            totalPrice = price - discount;
+          } else if (discountUnit === 'PERCENT') {
+            totalPrice = price - (price * discount) / 100;
+          }
+        } else {
+          totalPrice = price;
+        }
+      }
+
+      const updatedProduct = await this.prisma.product.update({
+        where: { id },
+        data: {
+          ...updateData,
+          slug,
+          totalPrice,
+          tags: tagIds !== undefined ? {
+            set: [],
+            connect: tagIds.map((id) => ({ id })),
+          } : undefined,
+          subCategories: subCategoryIds !== undefined ? {
+            set: [],
+            connect: subCategoryIds.map((id) => ({ id })),
+          } : undefined,
+        },
+        include: {
+          mainCategory: true,
+          category: true,
+          subCategories: true,
+          brand: true,
+          shop: true,
+          seller: true,
+          tags: true,
+          flash: true,
+          meta: true,
+        },
+      });
+
+      return updatedProduct;
+    } catch (error) {
+      if (error instanceof NotFoundException) {
+        throw error;
+      }
+      if (error instanceof Prisma.PrismaClientKnownRequestError) {
+        throw new Error(`Database error: ${error.message}`);
+      }
+      throw new Error(`Failed to update product: ${error.message}`);
+    }
+  }
+
+  async deleteProduct(id: string) {
+    try {
+      const product = await this.prisma.product.findUnique({ where: { id } });
+
+      if (!product) {
+        throw new NotFoundException(`Product with ID ${id} not found`);
+      }
+
+      await this.prisma.product.update({
+        where: { id },
+        data: { deletedAt: new Date() },
+      });
+
+      return { success: true, message: 'Product deleted successfully' };
+    } catch (error) {
+      if (error instanceof NotFoundException) {
+        throw error;
+      }
+      if (error instanceof Prisma.PrismaClientKnownRequestError) {
+        throw new Error(`Database error: ${error.message}`);
+      }
+      throw new Error(`Failed to delete product: ${error.message}`);
+    }
+  }
+
+  async approveProduct(id: string) {
+    try {
+      const product = await this.prisma.product.findUnique({ where: { id } });
+
+      if (!product) {
+        throw new NotFoundException(`Product with ID ${id} not found`);
+      }
+
+      return await this.prisma.product.update({
+        where: { id },
+        data: { isApproved: true },
+        include: {
+          mainCategory: true,
+          category: true,
+          subCategories: true,
+          brand: true,
+          shop: true,
+          seller: true,
+          tags: true,
+          flash: true,
+          meta: true,
+        },
+      });
+    } catch (error) {
+      if (error instanceof NotFoundException) {
+        throw error;
+      }
+      if (error instanceof Prisma.PrismaClientKnownRequestError) {
+        throw new Error(`Database error: ${error.message}`);
+      }
+      throw new Error(`Failed to approve product: ${error.message}`);
+    }
+  }
+
+  // Tag Methods
+  async createTag(createTagInput: CreateTagInput) {
+    try {
+      return await this.prisma.tag.create({
+        data: createTagInput
+      });
+    } catch (error) {
+      throw new Error(`Failed to create tag: ${error.message}`);
+    }
+  }
+
+  async findAllTags(searchInput: SearchInput) {
+    try {
+      const { page = 1, limit = 10 } = searchInput;
+      const skip = (page - 1) * limit;
+
+      const [tags, total] = await Promise.all([
+        this.prisma.tag.findMany({
+          skip,
+          take: limit,
+          orderBy: { createdAt: 'desc' }
+        }),
+        this.prisma.tag.count({ where: {} })
+      ]);
+
+      return {
+        tags,
+        meta: {
+          total,
+          page,
+          limit
+        }
+      };
+    } catch (error) {
+      throw new Error(`Failed to fetch tags: ${error.message}`);
+    }
+  }
+
+  async findTagById(id: string) {
+    try {
+      const tag = await this.prisma.tag.findUnique({ where: { id } });
+      if (!tag) {
+        throw new NotFoundException(`Tag with ID ${id} not found`);
+      }
+      return tag;
+    } catch (error) {
+      throw new Error(`Failed to fetch tag: ${error.message}`);
+    }
+  }
+
+  async updateTag(updateTagInput: UpdateTagInput) {
+    try {
+      const { id, ...data } = updateTagInput;
+      return await this.prisma.tag.update({
+        where: { id },
+        data
+      });
+    } catch (error) {
+      throw new Error(`Failed to update tag: ${error.message}`);
+    }
+  }
+
+  async deleteTag(id: string) {
+    try {
+      await this.prisma.tag.delete({ where: { id } });
+      return { success: true, message: 'Tag deleted successfully' };
+    } catch (error) {
+      throw new Error(`Failed to delete tag: ${error.message}`);
+    }
+  }
+
+  // Shop Methods
+  async createShop(createShopInput: CreateShopInput) {
+    try {
+      return await this.prisma.shop.create({
+        data: createShopInput
+      });
+    } catch (error) {
+      throw new Error(`Failed to create shop: ${error.message}`);
+    }
+  }
+
+  async findAllShops(searchInput: SearchInput) {
+    try {
+      const { page = 1, limit = 10 } = searchInput;
+      const skip = (page - 1) * limit;
+
+      const [shops, total] = await Promise.all([
+        this.prisma.shop.findMany({
+          skip,
+          take: limit,
+          orderBy: { createdAt: 'desc' }
+        }),
+        this.prisma.shop.count({ where: {} })
+      ]);
+
+      return {
+        shops,
+        meta: {
+          total,
+          page,
+          limit
+        }
+      };
+    } catch (error) {
+      throw new Error(`Failed to fetch shops: ${error.message}`);
+    }
+  }
+
+  async getFeaturedShops() {
+    try {
+      return await this.prisma.shop.findMany({
+        where: { isFeatured: true }
+      });
+    } catch (error) {
+      throw new Error(`Failed to fetch featured shops: ${error.message}`);
+    }
+  }
+
+  async findShopById(id: string) {
+    try {
+      const shop = await this.prisma.shop.findUnique({ where: { id } });
+      if (!shop) {
+        throw new NotFoundException(`Shop with ID ${id} not found`);
+      }
+      return shop;
+    } catch (error) {
+      throw new Error(`Failed to fetch shop: ${error.message}`);
+    }
+  }
+
+  async updateShop(updateShopInput: UpdateShopInput) {
+    try {
+      const { id, ...data } = updateShopInput;
+      return await this.prisma.shop.update({
+        where: { id },
+        data
+      });
+    } catch (error) {
+      throw new Error(`Failed to update shop: ${error.message}`);
+    }
+  }
+
+  async deleteShop(id: string) {
+    try {
+      await this.prisma.shop.delete({ where: { id } });
+      return { success: true, message: 'Shop deleted successfully' };
+    } catch (error) {
+      throw new Error(`Failed to delete shop: ${error.message}`);
+    }
+  }
+
+  // Seller Methods
+  async createSeller(createSellerInput: CreateSellerInput) {
+    try {
+      return await this.prisma.seller.create({
+        data: createSellerInput
+      });
+    } catch (error) {
+      throw new Error(`Failed to create seller: ${error.message}`);
+    }
+  }
+
+  async findAllSellers(searchInput: SearchInput) {
+    try {
+      const { page = 1, limit = 10 } = searchInput;
+      const skip = (page - 1) * limit;
+
+      const [sellers, total] = await Promise.all([
+        this.prisma.seller.findMany({
+          skip,
+          take: limit,
+          orderBy: { createdAt: 'desc' }
+        }),
+        this.prisma.seller.count({ where: {} })
+      ]);
+
+      return {
+        sellers,
+        meta: {
+          total,
+          page,
+          limit
+        }
+      };
+    } catch (error) {
+      throw new Error(`Failed to fetch sellers: ${error.message}`);
+    }
+  }
+
+  async getVerifiedSellers() {
+    try {
+      return await this.prisma.seller.findMany({
+        where: { isVerified: true }
+      });
+    } catch (error) {
+      throw new Error(`Failed to fetch verified sellers: ${error.message}`);
+    }
+  }
+
+  async findSellerById(id: string) {
+    try {
+      const seller = await this.prisma.seller.findUnique({ where: { id } });
+      if (!seller) {
+        throw new NotFoundException(`Seller with ID ${id} not found`);
+      }
+      return seller;
+    } catch (error) {
+      throw new Error(`Failed to fetch seller: ${error.message}`);
+    }
+  }
+
+  async updateSeller(updateSellerInput: UpdateSellerInput) {
+    try {
+      const { id, ...data } = updateSellerInput;
+      return await this.prisma.seller.update({
+        where: { id },
+        data
+      });
+    } catch (error) {
+      throw new Error(`Failed to update seller: ${error.message}`);
+    }
+  }
+
+  async deleteSeller(id: string) {
+    try {
+      await this.prisma.seller.delete({ where: { id } });
+      return { success: true, message: 'Seller deleted successfully' };
+    } catch (error) {
+      throw new Error(`Failed to delete seller: ${error.message}`);
+    }
+  }
+
+  // Flash Methods
+  async createFlash(createFlashInput: CreateFlashInput) {
+    try {
+      return await this.prisma.flash.create({
+        data: createFlashInput
+      });
+    } catch (error) {
+      throw new Error(`Failed to create flash: ${error.message}`);
+    }
+  }
+
+  async findAllFlashes(searchInput: SearchInput) {
+    try {
+      const { page = 1, limit = 10 } = searchInput;
+      const skip = (page - 1) * limit;
+
+      const [flashes, total] = await Promise.all([
+        this.prisma.flash.findMany({
+          skip,
+          take: limit,
+          orderBy: { createdAt: 'desc' }
+        }),
+        this.prisma.flash.count({ where: {} })
+      ]);
+
+      return {
+        flashes,
+        meta: {
+          total,
+          page,
+          limit
+        }
+      };
+    } catch (error) {
+      throw new Error(`Failed to fetch flashes: ${error.message}`);
+    }
+  }
+
+  async getActiveFlashes() {
+    try {
+      const now = new Date();
+      return await this.prisma.flash.findMany({
+        where: {
+          startDate: { lte: now },
+          endDate: { gte: now },
+          isActive: true
+        }
+      });
+    } catch (error) {
+      throw new Error(`Failed to fetch active flashes: ${error.message}`);
+    }
+  }
+
+  async findFlashById(id: string) {
+    try {
+      const flash = await this.prisma.flash.findUnique({ where: { id } });
+      if (!flash) {
+        throw new NotFoundException(`Flash with ID ${id} not found`);
+      }
+      return flash;
+    } catch (error) {
+      throw new Error(`Failed to fetch flash: ${error.message}`);
+    }
+  }
+
+  async updateFlash(updateFlashInput: UpdateFlashInput) {
+    try {
+      const { id, ...data } = updateFlashInput;
+      return await this.prisma.flash.update({
+        where: { id },
+        data
+      });
+    } catch (error) {
+      throw new Error(`Failed to update flash: ${error.message}`);
+    }
+  }
+
+  async deleteFlash(id: string) {
+    try {
+      await this.prisma.flash.delete({ where: { id } });
+      return { success: true, message: 'Flash deleted successfully' };
+    } catch (error) {
+      throw new Error(`Failed to delete flash: ${error.message}`);
+    }
+  }
+}
